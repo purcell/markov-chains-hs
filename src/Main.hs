@@ -3,13 +3,14 @@ module Main ( markov
             , main
             ) where
 
-import           Control.Applicative ((<$>))
-import           Data.List           (tails)
-import qualified Data.Map            as M
-import qualified Data.Text           as T
-import qualified Data.Text.IO        as TIO
-import           System.IO           (stdin)
-import qualified System.Random       as R
+import           Control.Applicative            ((<$>))
+import qualified Control.Monad.Trans.State.Lazy as ST
+import           Data.List                      (tails)
+import qualified Data.Map                       as M
+import qualified Data.Text                      as T
+import qualified Data.Text.IO                   as TIO
+import           System.IO                      (stdin)
+import qualified System.Random                  as R
 
 type ChainState a = [a]
 type ChainTransitions a = M.Map (ChainState a) [ChainState a]
@@ -21,24 +22,31 @@ buildChains len xs = foldr step M.empty allChains
     step ch m = let (prior, next:_) = splitAt (len - 1) ch in
       M.insertWith (++) prior [tail prior ++ [next]] m
 
-randomEntry :: R.RandomGen g => g -> [a] -> (a, g)
-randomEntry rand options =
-  let (idx, rand') = R.randomR (0, (length options - 1)) rand
-  in (options !! idx, rand')
+randomEntry :: R.RandomGen g => [a] -> ST.State g a
+randomEntry options = do
+  idx <- ST.state $ R.randomR (0, length options - 1)
+  return (options !! idx)
 
-nextState :: (Ord a, R.RandomGen g) => ChainTransitions a -> (ChainState a, g) -> (ChainState a, g)
-nextState chains (state, g) = case M.lookup state chains of
-  Just nextStates -> randomEntry g nextStates
-  Nothing -> randomEntry g $ M.keys chains
+nextState :: (Ord a, R.RandomGen g) => ChainTransitions a -> ChainState a -> ST.State g (ChainState a)
+nextState chains cur =  case M.lookup cur chains of
+   Just nextStates -> randomEntry nextStates
+   Nothing -> randomEntry $ M.keys chains
 
-generate :: (Ord a, R.RandomGen g) => ChainTransitions a -> g -> [a]
-generate chains rand = (head . fst) <$> tail (iterate (nextState chains) ([], rand))
+iterateM :: Monad m => (a -> m a) -> m a -> m [a]
+iterateM step start = do
+    first <- start
+    rest <- iterateM step (step first)
+    return (first:rest)
 
-markov :: (Ord a, R.RandomGen g) => Int -> [a] -> g -> [a]
+generate :: (Ord a, R.RandomGen g) => ChainTransitions a -> ST.State g [a]
+generate chains = fmap head . tail <$> iterateM (nextState chains) (return [])
+
+markov :: (Ord a, R.RandomGen g) => Int -> [a] -> ST.State g [a]
 markov len input = generate (buildChains len input)
 
 main :: IO ()
 main = do
   text <- TIO.hGetContents stdin
-  generated <- markov 3 (T.words text) <$> R.getStdGen
+  rand <- R.getStdGen
+  let generated = ST.evalState (markov 3 (T.words text)) rand
   mapM_ (\w -> putStr (T.unpack w ++ " ")) generated
